@@ -1,0 +1,5 @@
+{
+  "name": "guided-mr",
+  "owner": { "name": "Alex Jacobs" },
+  "plugins": [{ "name": "guided-mr", "source": "./" }]
+}
