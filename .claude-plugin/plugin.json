@@ -1,7 +1,7 @@
 {
   "name": "guided-mr",
   "version": "0.1.0",
-  "description": "Guided review of a GitLab MR or local branch: the diff grouped into ordered steps you page through in a pane",
+  "description": "Guided review of a GitHub PR, GitLab MR or local branch: the diff grouped into ordered steps you page through in a pane",
   "author": {
     "name": "Alex Jacobs"
   },

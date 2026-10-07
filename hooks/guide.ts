@@ -199,3 +199,28 @@ export function sizeBar(size: number, max: number, width = 8): string {
 
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
+
+export type Target =
+  | { kind: 'local'; base: string }
+  | { kind: 'github'; ref: string }
+  | { kind: 'gitlab'; ref: string; repo?: string }
+
+// Reads what /guided-mr was given. A bare number goes to whichever forge `origin` points at.
+export function parseTarget(args: string, remoteUrl: string): Target {
+  const text = args.trim()
+  if (!text) return { kind: 'local', base: '' }
+
+  if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(text)) return { kind: 'github', ref: text }
+  const gitlabUrl = /^(https?:\/\/[^/]+\/.+?)\/-\/merge_requests\/(\d+)/.exec(text)
+  if (gitlabUrl) return { kind: 'gitlab', ref: gitlabUrl[2] ?? '', repo: gitlabUrl[1] }
+
+  const github = /^#(\d+)$/.exec(text)
+  if (github) return { kind: 'github', ref: github[1] ?? '' }
+  const gitlab = /^!(\d+)$/.exec(text)
+  if (gitlab) return { kind: 'gitlab', ref: gitlab[1] ?? '' }
+  if (/^\d+$/.test(text)) {
+    return /(^|[@/.])github\.com[:/]/.test(remoteUrl) ? { kind: 'github', ref: text } : { kind: 'gitlab', ref: text }
+  }
+
+  return { kind: 'local', base: text }
+}

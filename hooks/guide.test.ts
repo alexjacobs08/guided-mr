@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { assembleGuide, parseDiff, sizeBar, splitHunk, truncateHunk } from './guide'
+import { assembleGuide, parseDiff, parseTarget, sizeBar, splitHunk, truncateHunk } from './guide'
 
 const DIFF = [
   'diff --git a/src/a.py b/src/a.py',
@@ -72,4 +72,22 @@ test('sizeBar scales to the largest size and shows at least one block', async ()
   expect(sizeBar(10, 10, 4)).toBe('████')
   expect(sizeBar(1, 100, 4)).toBe('█░░░')
   expect(sizeBar(0, 10, 4)).toBe('░░░░')
+})
+
+test('parseTarget picks the forge from the prefix, the URL or the origin remote', async () => {
+  const github = 'git@github.com:alexjacobs08/guided-mr.git'
+  const gitlab = 'git@gitlab.com:salus-pro/ai-team/api-ai.git'
+  expect(parseTarget('', github)).toEqual({ kind: 'local', base: '' })
+  expect(parseTarget('origin/develop', github)).toEqual({ kind: 'local', base: 'origin/develop' })
+  expect(parseTarget('123', github)).toEqual({ kind: 'github', ref: '123' })
+  expect(parseTarget('123', 'https://github.com/a/b.git')).toEqual({ kind: 'github', ref: '123' })
+  expect(parseTarget('380', gitlab)).toEqual({ kind: 'gitlab', ref: '380' })
+  expect(parseTarget('#7', gitlab)).toEqual({ kind: 'github', ref: '7' })
+  expect(parseTarget('!7', github)).toEqual({ kind: 'gitlab', ref: '7' })
+  expect(parseTarget('https://github.com/a/b/pull/9', gitlab)).toEqual({ kind: 'github', ref: 'https://github.com/a/b/pull/9' })
+  expect(parseTarget('https://gitlab.com/salus-pro/ai-team/api-ai/-/merge_requests/380', github)).toEqual({
+    kind: 'gitlab',
+    ref: '380',
+    repo: 'https://gitlab.com/salus-pro/ai-team/api-ai',
+  })
 })

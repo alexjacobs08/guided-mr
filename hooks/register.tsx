@@ -2,13 +2,21 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { BuildStatus, Guide, Hunk } from '../types'
-import { assembleGuide, buildPrompt, parseDiff, sizeBar, splitHunk, SYSTEM, truncateHunk } from './guide'
+import { assembleGuide, buildPrompt, parseDiff, parseTarget, sizeBar, splitHunk, SYSTEM, truncateHunk } from './guide'
 import { renderHtml } from './html'
 
 const PANE = 'guided-mr'
 const MODEL = 'opus'
 const SPLIT_MIN_COLUMNS = 110
 const COLLAPSED_LINES = 25
+const USAGE = [
+  ['/guided-mr', "this branch against the repo's default branch"],
+  ['/guided-mr 123', 'PR or MR 123 on the GitHub or GitLab repo origin points at'],
+  ['/guided-mr #123', 'GitHub PR 123'],
+  ['/guided-mr !123', 'GitLab MR 123'],
+  ['/guided-mr <url>', 'a GitHub PR or GitLab MR link'],
+  ['/guided-mr some-ref', 'this branch against that ref'],
+] as const
 
 const guideAtom = atom({ plugin: 'guided-mr', key: 'guide' } as const, null)
 const viewAtom = atom({ plugin: 'guided-mr', key: 'view' } as const, -1)
@@ -21,8 +29,19 @@ const expandedAtom = atom({ plugin: 'guided-mr', key: 'expanded' } as const, [])
 
 type Collected = { diff: string; source: string; background: string }
 
+const INSTALL_HINTS: Record<string, string> = {
+  gh: 'Install the GitHub CLI (https://cli.github.com) and run `gh auth login`.',
+  glab: 'Install the GitLab CLI (https://gitlab.com/gitlab-org/cli) and run `glab auth login`.',
+}
+
 async function run($: EngineInterface, argv: string[], timeoutMs = 60000): Promise<string> {
-  const result = await $.process.run(argv, { timeoutMs })
+  let result
+  try {
+    result = await $.process.run(argv, { timeoutMs })
+  } catch (error) {
+    const hint = INSTALL_HINTS[argv[0] ?? '']
+    throw new Error(`${argv[0]} could not run.${hint ? ` ${hint}` : ''} (${error instanceof Error ? error.message : String(error)})`)
+  }
   if (result.exitCode !== 0) {
     throw new Error(`${argv.slice(0, 3).join(' ')} failed: ${result.stderr.trim() || `exit ${result.exitCode}`}`)
   }
@@ -30,30 +49,58 @@ async function run($: EngineInterface, argv: string[], timeoutMs = 60000): Promi
   return result.stdout
 }
 
+async function tryRun($: EngineInterface, argv: string[]): Promise<string | null> {
+  try {
+    return (await run($, argv)).trim()
+  } catch {
+    return null
+  }
+}
+
+async function defaultBase($: EngineInterface): Promise<string> {
+  const head = await tryRun($, ['git', 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+  if (head) return head
+  for (const ref of ['origin/main', 'origin/master', 'main', 'master']) {
+    if ((await tryRun($, ['git', 'rev-parse', '--verify', '--quiet', ref])) !== null) return ref
+  }
+
+  return 'main'
+}
+
 async function collect($: EngineInterface, args: string): Promise<Collected> {
-  const mr = /^!?(\d+)$/.exec(args)
-  if (mr) {
-    const iid = mr[1] ?? ''
-    const view = JSON.parse(await run($, ['glab', 'mr', 'view', iid, '-F', 'json'])) as {
+  const target = parseTarget(args, (await tryRun($, ['git', 'remote', 'get-url', 'origin'])) ?? '')
+
+  if (target.kind === 'github') {
+    const view = JSON.parse(
+      await run($, ['gh', 'pr', 'view', target.ref, '--json', 'number,title,body,headRefName,baseRefName']),
+    ) as { number?: number; title?: string; body?: string; headRefName?: string; baseRefName?: string }
+    const diff = await run($, ['gh', 'pr', 'diff', target.ref, '--color=never'], 120000)
+
+    return {
+      diff,
+      source: `#${view.number ?? target.ref} ${view.title ?? ''} (${view.headRefName ?? '?'} into ${view.baseRefName ?? '?'})`,
+      background: view.body ?? '',
+    }
+  }
+
+  if (target.kind === 'gitlab') {
+    const repo = target.repo ? ['-R', target.repo] : []
+    const view = JSON.parse(await run($, ['glab', 'mr', 'view', target.ref, ...repo, '-F', 'json'])) as {
       title?: string
       description?: string
       source_branch?: string
       target_branch?: string
     }
-    const diff = await run($, ['glab', 'mr', 'diff', iid, '--raw', '--color=never'], 120000)
+    const diff = await run($, ['glab', 'mr', 'diff', target.ref, ...repo, '--raw', '--color=never'], 120000)
 
     return {
       diff,
-      source: `!${iid} ${view.title ?? ''} (${view.source_branch ?? '?'} into ${view.target_branch ?? '?'})`,
+      source: `!${target.ref} ${view.title ?? ''} (${view.source_branch ?? '?'} into ${view.target_branch ?? '?'})`,
       background: view.description ?? '',
     }
   }
 
-  let base = args
-  if (!base) {
-    const hasOrigin = (await $.process.run(['git', 'rev-parse', '--verify', '--quiet', 'origin/main'])).exitCode === 0
-    base = hasOrigin ? 'origin/main' : 'main'
-  }
+  const base = target.base || (await defaultBase($))
   const branch = (await run($, ['git', 'rev-parse', '--abbrev-ref', 'HEAD'])).trim()
   const diff = await run($, ['git', 'diff', '--no-color', '--no-ext-diff', '-U3', `${base}...HEAD`], 120000)
   const log = await run($, ['git', 'log', '--no-merges', '--format=- %s%n%b', `${base}..HEAD`])
@@ -109,8 +156,8 @@ async function openInBrowser($: EngineInterface, guide: Guide): Promise<string> 
 function registerCommand($: EngineInterface) {
   return $.command.register({
     name: 'guided-mr',
-    description: 'Guided review: the diff as ordered steps in a pane (branch vs main, an MR number, or a base ref)',
-    argumentHint: '[MR number | base ref | show | web]',
+    description: 'Guided review: a GitHub PR, GitLab MR or branch diff as ordered steps in a pane',
+    argumentHint: '[PR/MR number or URL | base ref | show | web]',
   })
 }
 
@@ -188,18 +235,12 @@ export const register: Register = on => {
             </Text>
             <Text dimColor>A guided, step-by-step walk through a change.</Text>
             <Text> </Text>
-            <Text>
-              <Text color="suggestion">/guided-mr</Text>
-              <Text dimColor>{'           '}this branch against origin/main</Text>
-            </Text>
-            <Text>
-              <Text color="suggestion">/guided-mr 380</Text>
-              <Text dimColor>{'       '}GitLab MR !380</Text>
-            </Text>
-            <Text>
-              <Text color="suggestion">/guided-mr some-ref</Text>
-              <Text dimColor>{'  '}this branch against that ref</Text>
-            </Text>
+            {USAGE.map(([command, what]) => (
+              <Text>
+                <Text color="suggestion">{command.padEnd(21)}</Text>
+                <Text dimColor>{what}</Text>
+              </Text>
+            ))}
           </Box>
         </Box>
       )
